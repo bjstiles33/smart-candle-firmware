@@ -6,7 +6,7 @@
 //  - Clear any RTC holds during HP↔LP handoff
 //  - Leave all other behavior intact
 
-//#include "fpsm_flicker.h"
+#include "fpsm_flicker.h"
 
 #include <inttypes.h>
 #include "esp_log.h"
@@ -17,7 +17,7 @@
 #include "esp_sleep.h"
 
 // Prebuilt LP blob you already placed at components/fpsm/ulp/
-//#include "lp_core_bin.h"
+#include "lp_core_bin.h"
 
 // --------- Configuration you already use ----------
 static const char *TAG = "fpsm";
@@ -363,6 +363,7 @@ void fpsm_apply_preset_nightlight_glow_v3() {
   fpsm_set_target_stride(5);  // modest responsiveness
 
 }
+
 
 
 
