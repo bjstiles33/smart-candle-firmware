@@ -1,0 +1,898 @@
+esphome:
+  name: esphome-web-61b664
+  friendly_name: Candle 3
+  build_path: /config/esphome/.out/esphome-web-61b664
+  min_version: 2025.5.0
+  name_add_mac_suffix: false
+  includes:
+    - espnow_sync.h
+    - components/fpsm/fpsm_flicker.h
+    - components/fpsm/fpsm_component.h
+  platformio_options:
+    build_flags:
+      - -I"/config/esphome/components/fpsm"
+      - -I"/config/esphome/components/fpsm/ulp"
+  on_boot:
+    - priority: 900.0
+      then:
+        - lambda: |-
+            // Hard-clamp the LED pin low as early as possible.
+            gpio_set_direction(GPIO_NUM_1, GPIO_MODE_OUTPUT);
+            gpio_set_level(GPIO_NUM_1, 0);
+    
+    - priority: 610.0
+      then:
+        - lambda: |-
+            if (!EspNowSync::get()) { auto *s = new EspNowSync(/*group=*/1); } //Ensure the ESPNOW object exists and is initialized
+  
+    - priority: 605.0
+      then:
+       - lambda: |-
+            auto *s = EspNowSync::get();
+            if (s) { 
+              s->bind_ui_light(id(fpsm_light));                
+              s->bind_saved_brightness(&id(saved_brightness));
+              s->bind_preset_select(id(fpsm_preset_select));
+            }
+
+    - priority: 600.0
+      then:
+        - if:
+            condition:
+              switch.is_on: queen_mode
+            then:
+              - lambda: |-
+                  auto *s = EspNowSync::get();
+                  if (s) { s->set_queen_mode(true); s->start_queen_mode(); }
+
+    - priority: -100
+      then:
+        - lambda: |-
+            if (auto *s = EspNowSync::get()) s->setup();
+        - lambda: |-
+            auto *s = EspNowSync::get();
+            if (s && s->woke_from_timer_boot()) {
+              s->start_peek_auto(230);
+            }
+        - delay: 300ms
+        - script.execute: update_hive_interval
+        - script.execute: compute_hive_sleep
+        - if:
+            condition:
+              lambda: |-
+                auto *s = EspNowSync::get();
+                return s && s->woke_from_timer_boot() && (s->hive_awake_ms_remaining() == 0);
+            then:
+              - lambda: |-
+                  gpio_set_direction(GPIO_NUM_1, GPIO_MODE_OUTPUT);
+                  gpio_set_level(GPIO_NUM_1, 0);
+                  gpio_hold_en(GPIO_NUM_1);
+              - deep_sleep.enter: ds
+            else:
+              - lambda: |-
+                  auto *s = EspNowSync::get();
+                  if (s && s->woke_from_timer_boot()) s->ensure_wifi_connected();
+
+esp32:
+  board: esp32-c6-devkitm-1
+  variant: esp32c6
+  framework:
+    type: esp-idf
+    sdkconfig_options:
+      CONFIG_ULP_COPROC_ENABLED: y
+      CONFIG_ULP_COPROC_TYPE_LP_CORE: y
+      CONFIG_ULP_COPROC_RESERVE_MEM: "8192"   # adjust if your LP binary grows
+      CONFIG_BOOTLOADER_LOG_LEVEL_NONE: y
+      CONFIG_ESP_CONSOLE_NONE: y
+      CONFIG_ESP_CONSOLE_UART_DEFAULT: n
+      CONFIG_BOOT_ROM_LOG_ALWAYS_ON: n
+
+external_components:
+  - source:
+      type: local
+      path: /config/esphome/components      # parent that contains ./components/fpsm/
+    components: [ fpsm ]
+  - source: github://rednblkx/HAP-ESPHome@b8494709780c5ca0e83cbcc3fb865dc800d03c73     # pinned HomeKit
+  - source: github://PhracturedBlue/c6_adc@665cc257fd0607c270da762a80e3baa6a788926b     # pinned ADC
+
+# Alternative: local mirrors (uncomment these 4 lines and comment the GitHub block above)
+# external_components:
+#   - source: local
+#     path: external/HAP-ESPHome
+#   - source: local
+#     path: external/c6_adc
+
+fpsm:
+  id: fpsm_component
+
+logger:
+  baud_rate: 0   #disables UART logging at runtime
+
+ota:
+  - platform: esphome
+
+api:
+
+wifi:
+  ssid: "Keep It On The Download - 2"
+  password: "engineer"
+  ap:
+    ssid: "LED-Candle Fallback"
+    password: "fallbackpass"
+
+# Light output (adjust pins to your hardware)
+output:
+  - platform: ledc
+    pin: GPIO1
+    id: candle_output
+    frequency: 1000 Hz
+
+  - platform: template
+    id: fpsm_output
+    type: float
+    write_action:
+      - lambda: |-
+
+          const float s = state;  // 'state' is 0.0..1.0 from the light slider (called on every change)
+
+          if (s < 0.005f) {  // Off: disable FPSM and set 0 brightness
+            fpsm_set_brightness(0);
+            //fpsm_set_enabled(false);
+          } else {
+            
+            if (fabsf(id(saved_brightness) - s) > 0.02f) {
+              id(saved_brightness) = s;    // stored to NVS because restore_value: yes
+            }
+            
+            // On: map to 0..200, update brightness, ensure FPSM is enabled
+            const uint8_t level200 = (uint8_t)(s * 140.0f + 0.5f);      // 0..255
+            fpsm_set_brightness(level200);
+
+            if (auto *sync = EspNowSync::get(); sync && sync->is_queen()) {
+              uint32_t beacon_ms = id(hive_interval_ms) * 2UL + 1200UL;
+              if (beacon_ms < 8000UL) beacon_ms = 8000UL;
+              sync->start_cmd_beacon(/*CMD_SET_BRIGHTNESS*/0x03, /*arg=*/level200, /*ttl_s=*/120, beacon_ms); }
+          }
+
+
+
+light:
+  - platform: monochromatic
+    id: candle_light
+    internal: true
+    name: "Smart Candle Light"
+    output: candle_output
+    default_transition_length: 0s
+    restore_mode: ALWAYS_OFF
+    on_turn_on:
+      - lambda: |-
+         //gpio_set_direction(GPIO_NUM_1, GPIO_MODE_OUTPUT);
+         //for (int i=0;i<4;i++){ gpio_set_level(GPIO_NUM_1,1); delay(200); gpio_set_level(GPIO_NUM_1,0); delay(200); }
+
+         // if (auto *s = EspNowSync::get()) {
+         //   s->start_wake_group(/*ttl_s=*/45, /*beacon_ms=*/12000);
+         //   delay(1000);  // Delay for HA UI sync before disconnect
+         // }
+
+  - platform: monochromatic
+    id: fpsm_light
+    name: "FPSM Candle"
+    output: fpsm_output
+    gamma_correct: 1.0              # linear mapping => predictable LP levels
+    default_transition_length: 0s   # immediate LP response on slider moves
+    restore_mode: RESTORE_DEFAULT_OFF
+    on_turn_on:
+      - lambda: |-
+          fpsm_set_enabled(true);
+          
+          float b = id(saved_brightness);  // Apply saved brightness without changing ON/OFF boot behavior
+          if (b < 0.0f) b = 0.0f;
+          if (b > 1.0f) b = 1.0f;
+
+          auto call = id(fpsm_light).turn_on();
+          call.set_brightness(b);
+          call.set_transition_length(0);
+          call.perform();
+
+          if (auto *s = EspNowSync::get(); s && s->is_queen()) {
+            uint32_t beacon_ms = id(hive_interval_ms) * 2UL + 1200UL;
+            if (beacon_ms < 8000UL) beacon_ms = 8000UL;
+            s->start_cmd_beacon(/*CMD_FPSM_ONOFF*/0x04, /*arg=*/1, /*ttl_s=*/120, beacon_ms); }
+    on_turn_off:
+      - lambda: |-
+          fpsm_set_enabled(false);
+          if (auto *s = EspNowSync::get(); s && s->is_queen()) {
+            uint32_t beacon_ms = id(hive_interval_ms) * 2UL + 1200UL;
+            if (beacon_ms < 8000UL) beacon_ms = 8000UL;
+            s->start_cmd_beacon(/*CMD_FPSM_ONOFF*/0x04, /*arg=*/0, /*ttl_s=*/120, beacon_ms); }
+
+
+# Deep sleep component (duration is set dynamically before entering)
+deep_sleep:
+  id: ds  # manual deep sleep; enter via actions only
+
+globals:
+  - id: saved_brightness
+    type: float
+    restore_value: yes
+    initial_value: '0.0'
+
+  - id: hive_interval_ms
+    type: uint32_t
+    restore_value: no
+    initial_value: '15000UL'
+
+# Controls
+switch:
+  - platform: template
+    id: hive_mode
+    name: "Hive Mode (Power Saver)"
+    optimistic: true
+    restore_mode: ALWAYS_OFF
+    turn_on_action:
+      - lambda: |-
+          if (auto *s = EspNowSync::get()) s->start_peek_auto(230);
+      - delay: 300ms
+      - script.execute: update_hive_interval
+      - script.execute: compute_hive_sleep
+      - if:
+          condition:
+            lambda: |-
+              auto *s = EspNowSync::get();
+              return s && (s->hive_awake_ms_remaining() == 0);
+          then:
+            - lambda: |-
+                gpio_set_direction(GPIO_NUM_1, GPIO_MODE_OUTPUT);
+                gpio_set_level(GPIO_NUM_1, 0);
+                gpio_hold_en(GPIO_NUM_1);
+            - deep_sleep.enter: ds
+          else:
+            - lambda: |-
+                if (auto *s = EspNowSync::get()) s->ensure_wifi_connected();
+
+  - platform: template
+    id: wake_hive_now
+    name: "Wake Hive Now"
+    optimistic: true
+    turn_on_action:
+     - script.execute: update_hive_interval
+
+     # --- NEW: delay so the first burst lands in the center of the next peek ---
+     - delay: !lambda |-
+         auto *s = EspNowSync::get();
+         if (!s) return 0;
+         if (!s->is_time_synced()) return 0;  // fallback: send immediately
+         const uint32_t interval = id(hive_interval_ms);
+         if (interval < 1000U) return 0;
+         const uint32_t phase        = s->current_hive_time() % interval;
+         const uint32_t center       = 115U;   // center of 230 ms peek
+         const uint32_t rf_warmup_ms = 10U;    // small radio settle margin
+         // delay until the center of the upcoming peek window
+         uint32_t delay_ms = (interval + center + interval - phase - rf_warmup_ms) % interval;
+         return (int)delay_ms;
+
+     - lambda: |-
+         auto *s = EspNowSync::get();
+         if (s) {
+           // Keep your existing sizing: ≥ 3× interval with a small margin
+           uint32_t beacon_ms = id(hive_interval_ms) * 2UL + 1200UL; // +1.5s margin
+           if (beacon_ms < 8000UL) beacon_ms = 8000UL;
+           s->trigger_wake_group(/*ttl_s=*/120, beacon_ms);
+         }
+
+     - delay: 1s
+     - switch.turn_off: wake_hive_now
+
+
+  - platform: template
+    id: send_cmd_now
+    name: "Send Command Now"
+    optimistic: true
+    turn_on_action:
+     - script.execute: update_hive_interval
+
+     # --- NEW: delay so the first burst lands in the center of the next peek ---
+     - delay: !lambda |-
+         auto *s = EspNowSync::get();
+         if (!s) return 0;
+         if (!s->is_time_synced()) return 0;  // fallback: send immediately
+         const uint32_t interval = id(hive_interval_ms);
+         if (interval < 1000U) return 0;
+         const uint32_t phase        = s->current_hive_time() % interval;
+         const uint32_t center       = 115U;   // center of 230 ms peek
+         const uint32_t rf_warmup_ms = 10U;    // small radio settle margin
+         // delay until the center of the upcoming peek window
+         uint32_t delay_ms = (interval + center + interval - phase - rf_warmup_ms) % interval;
+         return (int)delay_ms;
+
+     - lambda: |-
+         auto *s = EspNowSync::get();
+         if (s) {
+           // Keep your existing sizing: ≥ 3× interval with a small margin
+           uint32_t beacon_ms = id(hive_interval_ms) * 2UL + 1200UL; // +1.5s margin
+           const uint8_t level = (uint8_t)(14); 
+           if (beacon_ms < 8000UL) beacon_ms = 8000UL;
+           s->start_cmd_beacon(CMD_SET_BRIGHTNESS, level, /*ttl_s=*/120, beacon_ms);
+           id(saved_brightness) = (float) level / 140.0f;
+
+           //float b = id(saved_brightness);
+           //if (b < 0.05f || b > 1.0f) b = 0.6f;  // clamp + fallback
+           //auto call = id(fpsm_light).turn_on();
+           //call.set_brightness(b);
+           //call.set_transition_length(0);
+           //call.perform();
+         }
+
+     - delay: 1s
+     - switch.turn_off: send_cmd_now
+
+  - platform: template
+    id: queen_mode
+    name: "Queen Mode (Central Hub)"
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    turn_on_action:
+      - lambda: |-
+          if (auto *s = EspNowSync::get()) {
+            s->set_queen_mode(true);
+            s->start_queen_mode();
+          }
+
+  - platform: template
+    id: verbose_logs
+    name: "Verbose Logs"
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    turn_on_action:
+      - logger.set_level: DEBUG
+    turn_off_action:
+      - logger.set_level: INFO
+
+
+button:
+  - platform: template
+    name: "Link Mode"
+    id: link_mode
+    on_press:
+      - script.execute: update_hive_interval
+      - lambda: |-
+          if (auto *s = EspNowSync::get()) {
+            // Use the current Peek Interval selection so the wake sweep covers
+            // at least 2 peek windows *per channel* (the header multiplies by 2).
+            s->start_link_mode(/*peek_window_ms=*/id(hive_interval_ms),
+                               /*windows_to_cover=*/1.25f,
+                               /*wake_ttl_s=*/120,
+                               /*probe_ms=*/3000,
+                               /*dwell_ms=*/35);
+          }
+      - script.execute: link_blink
+  - platform: template
+    name: "Dump Diagnostics"
+    on_press:
+      - lambda: |-
+          if (auto *s = EspNowSync::get()) s->log_diagnostics();
+  - platform: template
+    name: "Reset Diagnostics"
+    on_press:
+      - lambda: |-
+          if (auto *s = EspNowSync::get()) s->reset_diagnostics();
+
+script:
+  - id: update_hive_interval
+    then:
+      - lambda: |-
+          auto opt = id(hive_peek_interval).state;
+          int sec = 15;
+          if (opt == "5s") sec = 5; else if (opt == "10s") sec = 10; else if (opt == "15s") sec = 15; else if (opt == "20s") sec = 20; else if (opt == "30s") sec = 30; else sec = 60;
+          uint32_t interval_ms = (uint32_t)sec * 1000UL;
+          if (interval_ms < 1000UL) interval_ms = 1000UL; // safety floor
+          id(hive_interval_ms) = interval_ms;
+          if (auto *s = EspNowSync::get()) s->set_hive_interval_ms(interval_ms);
+
+  - id: compute_hive_sleep
+    then:
+      - lambda: |-
+          uint32_t sleep_ms;
+          auto *s = EspNowSync::get();
+          if(s && s->is_time_synced()) {
+            uint32_t hive_mod = s->current_hive_time() % id(hive_interval_ms);
+            uint32_t to_next = (hive_mod == 0) ? id(hive_interval_ms) : id(hive_interval_ms) - hive_mod;
+            sleep_ms = to_next - 100UL; // Early wake margin
+            if(sleep_ms < 400UL) sleep_ms += id(hive_interval_ms); // Skip if too short
+          } else {
+            sleep_ms = id(hive_interval_ms) - 230UL;
+          }
+          id(ds).set_sleep_duration(sleep_ms);
+
+  - id: link_blink
+    mode: restart
+    then:
+      # Only blink if the candle is currently ON; we avoid turning it on so
+      # the light's on_turn_on automation (which sends WAKE) doesn't fire.
+      #- lambda: |-
+      #    //if (!id(candle_light).current_values.is_on()) return;  // do nothing if OFF
+      #    //id(saved_brightness) = id(candle_light).current_values.get_brightness();
+      - while:
+          condition:
+            lambda: |-
+              auto *s = EspNowSync::get();
+              return s && s->link_active(); //&& id(candle_light).current_values.is_on();
+          then:
+            - light.turn_on:
+                id: candle_light
+                brightness: 90%
+                transition_length: 0s
+            - delay: 500ms
+            - light.turn_on:
+                id: candle_light
+                brightness: 30%
+                transition_length: 0s
+            - delay: 500ms
+      - light.turn_off:
+          id: candle_light
+          transition_length: 0s
+        #- lambda: |-
+        #  if (id(candle_light).current_values.is_on()) {
+        #    float br = id(saved_brightness);
+        #    if (br <= 0.0f) br = 0.5f;
+        #    auto call = id(candle_light).turn_on();
+        #    call.set_brightness(br);
+        #    call.set_transition_length(0);
+        #    call.perform();
+        #  }
+
+select:
+  - platform: template
+    id: hive_peek_interval
+    name: "Peek Interval"
+    options:
+      - "5s"
+      - "10s"
+      - "15s"
+      - "20s"
+      - "30s"
+      - "60s"
+    optimistic: true
+    restore_value: true
+    initial_option: "15s"
+
+  - platform: template
+    id: fpsm_preset_select
+    name: "FPSM Preset"
+    optimistic: true
+    restore_value: true
+    initial_option: "Calm Pillar"
+    options:
+      - "Calm Pillar"
+      - "Standard Candle"
+      - "Fireplace"
+      - "Nightlight Glow"
+    set_action:
+      - lambda: |-
+          if (x == "Calm Pillar") { fpsm_apply_preset_calm_pillar_v3(); } 
+          else if (x == "Standard Candle") { fpsm_apply_preset_standard_candle_v3(); } 
+          else if (x == "Fireplace") { fpsm_apply_preset_fireplace_v3(); } 
+          else if (x == "Nightlight Glow") { fpsm_apply_preset_nightlight_glow_v3(); }
+
+          if (auto *s = EspNowSync::get(); s && s->is_queen()) {
+            uint8_t preset_id = 0;
+            if      (x == "Calm Pillar")       preset_id = 0;
+            else if (x == "Standard Candle")   preset_id = 1;
+            else if (x == "Fireplace")         preset_id = 2;
+            else if (x == "Nightlight Glow")   preset_id = 3;
+
+            uint32_t beacon_ms = id(hive_interval_ms) * 2UL + 1200UL;
+            if (beacon_ms < 8000UL) beacon_ms = 8000UL;
+            s->start_cmd_beacon(/*CMD_SET_PRESET*/0x05, /*arg=*/preset_id, /*ttl_s=*/120, beacon_ms);
+          }
+
+
+# Diagnostics sensors (numeric)
+sensor:
+  - platform: template
+    name: "Link Hop Count"
+    id: diag_link_hops
+    update_interval: 1s
+    accuracy_decimals: 0
+    lambda: |-
+      auto *s = EspNowSync::get();
+      return s ? (float) s->link_hop_count() : NAN;
+
+  - platform: c6_adc
+    pin: GPIO2
+    id: battery_voltage
+    name: "Battery Voltage"
+    attenuation: 12db
+    update_interval: 10s
+    filters:
+      - multiply: 2.0
+    unit_of_measurement: "V"
+
+  - platform: template
+    name: "Battery Level"
+    unit_of_measurement: "%"
+    accuracy_decimals: 0
+    update_interval: 10s
+    lambda: |-
+      float v = id(battery_voltage).state;
+      if (v < 3.2) return 0;
+      else if (v > 4.2) return 100;
+      else return (v - 3.2) * 100.0 / (4.2 - 3.2);
+
+  - platform: template
+    name: "Link Current Channel"
+    id: diag_link_scan_ch
+    update_interval: 1s
+    accuracy_decimals: 0
+    lambda: |-
+      auto *s = EspNowSync::get();
+      return s ? (float) s->link_current_channel() : NAN;
+
+  - platform: template
+    name: "Last Wake (s ago)"
+    unit_of_measurement: "s"
+    accuracy_decimals: 0
+    update_interval: 10s
+    lambda: |-
+      auto *s = EspNowSync::get();
+      if (!s) return 0.0f;
+      uint32_t ms = s->last_wake_time_ms();
+      if (ms == 0) return 0.0f;
+      uint32_t now = millis();
+      uint32_t diff = (now >= ms) ? (now - ms) : 0U;
+      return (float)(diff / 1000U);
+
+  - platform: template
+    name: "RC Channel"
+    id: diag_rc_channel
+    update_interval: 5s
+    accuracy_decimals: 0
+    lambda: |-
+      auto *s = EspNowSync::get();
+      return s ? (float) s->rendezvous_channel() : NAN;
+
+  - platform: template
+    name: "Home Channel"
+    id: diag_home_channel
+    update_interval: 10s
+    accuracy_decimals: 0
+    lambda: |-
+      auto *s = EspNowSync::get();
+      return s ? (float) s->home_channel() : NAN;
+
+  - platform: template
+    name: "Hive Awake Remaining (s)"
+    id: diag_hive_awake_s
+    unit_of_measurement: "s"
+    accuracy_decimals: 0
+    update_interval: 1s
+    lambda: |-
+      auto *s = EspNowSync::get();
+      return s ? (float) (s->hive_awake_ms_remaining() / 1000.0f) : NAN;
+
+  - platform: template
+    name: "Last RX RSSI"
+    id: diag_last_rssi
+    unit_of_measurement: "dBm"
+    accuracy_decimals: 0
+    update_interval: 5s
+    lambda: |-
+      auto *s = EspNowSync::get();
+      return s ? (float) s->last_rx_rssi() : NAN;
+
+  - platform: template
+    name: "RX WAKE Count"
+    id: diag_rx_wake
+    update_interval: 10s
+    accuracy_decimals: 0
+    lambda: |-
+      auto *s = EspNowSync::get();
+      return s ? (float) s->rx_wake_count() : NAN;
+
+  - platform: template
+    name: "RX PROBE Count"
+    id: diag_rx_probe
+    update_interval: 10s
+    accuracy_decimals: 0
+    lambda: |-
+      auto *s = EspNowSync::get();
+      return s ? (float) s->rx_probe_count() : NAN;
+
+  - platform: template
+    name: "RX RESP Count"
+    id: diag_rx_resp
+    update_interval: 10s
+    accuracy_decimals: 0
+    lambda: |-
+      auto *s = EspNowSync::get();
+      return s ? (float) s->rx_resp_count() : NAN;
+
+  - platform: template
+    name: "RX SET Count"
+    id: diag_rx_set
+    update_interval: 10s
+    accuracy_decimals: 0
+    lambda: |-
+      auto *s = EspNowSync::get();
+      return s ? (float) s->rx_set_count() : NAN;
+
+  - platform: template
+    name: "RX ACK Count"
+    id: diag_rx_ack
+    update_interval: 10s
+    accuracy_decimals: 0
+    lambda: |-
+      auto *s = EspNowSync::get();
+      return s ? (float) s->rx_ack_count() : NAN;
+
+  - platform: template
+    name: "TX WAKE Count"
+    id: diag_tx_wake
+    update_interval: 10s
+    accuracy_decimals: 0
+    lambda: |-
+      auto *s = EspNowSync::get();
+      return s ? (float) s->tx_wake_count() : NAN;
+
+  - platform: template
+    name: "TX RESP Count"
+    id: diag_tx_resp
+    update_interval: 10s
+    accuracy_decimals: 0
+    lambda: |-
+      auto *s = EspNowSync::get();
+      return s ? (float) s->tx_resp_count() : NAN;
+
+  - platform: template
+    name: "TX SET Count"
+    id: diag_tx_set
+    update_interval: 10s
+    accuracy_decimals: 0
+    lambda: |-
+      auto *s = EspNowSync::get();
+      return s ? (float) s->tx_set_count() : NAN;
+
+  - platform: template
+    name: "TX ACK Count"
+    id: diag_tx_ack
+    update_interval: 10s
+    accuracy_decimals: 0
+    lambda: |-
+      auto *s = EspNowSync::get();
+      return s ? (float) s->tx_ack_count() : NAN;
+
+  - platform: template
+    name: "AP Mask"
+    id: diag_ap_mask
+    update_interval: 10s
+    accuracy_decimals: 0
+    lambda: |-
+      auto *s = EspNowSync::get();
+      return s ? (float) s->ap_mask() : NAN;
+
+  - platform: template
+    name: "Last Sync (s ago)"
+    id: diag_last_sync_s
+    update_interval: 1s
+    accuracy_decimals: 0
+    lambda: |-
+      auto *s = EspNowSync::get();
+      return s ? (float) s->last_sync_s() : NAN;
+
+  - platform: template
+    name: "RC Change Count"
+    id: rc_change_count
+    unit_of_measurement: "count"
+    accuracy_decimals: 0
+    update_interval: 10s
+    lambda: |-
+      auto c = EspNowSync::get();
+      if (c == nullptr) return NAN;
+      return (float)c->rc_change_count();
+
+  - platform: template
+    name: "Last RC Change (s ago)"
+    id: last_rc_change_s
+    unit_of_measurement: "s"
+    accuracy_decimals: 0
+    update_interval: 10s
+    lambda: |-
+      auto c = EspNowSync::get();
+      if (c == nullptr) return NAN;
+      return (float)c->last_rc_change_s();
+
+  - platform: template
+    name: "Boot Count"
+    id: boot_count
+    unit_of_measurement: "count"
+    accuracy_decimals: 0
+    update_interval: 10s
+    lambda: |-
+      auto c = EspNowSync::get();
+      if (c == nullptr) return NAN;
+      return (float)c->boot_count();      
+
+# Diagnostics text sensors
+text_sensor:
+  - platform: template
+    name: "Link Phase"
+    id: diag_link_phase
+    update_interval: 1s
+    lambda: |-
+      auto *s = EspNowSync::get();
+      return s ? std::string(s->link_phase_str()) : std::string("n/a");
+
+  - platform: template
+    name: "RC Persist Source"
+    id: rc_persist_source
+    update_interval: 10s
+    lambda: |-
+      auto c = EspNowSync::get();
+      if (c == nullptr) return std::string();
+      return std::string(c->rc_persist_source());
+
+  - platform: template
+    name: "Last RC Change Reason"
+    id: last_rc_change_reason
+    update_interval: 10s
+    lambda: |-
+      auto c = EspNowSync::get();
+      if (c == nullptr) return std::string();
+      return std::string(c->last_rc_change_reason());
+
+  - platform: template
+    name: "Used Channel Mask"
+    id: diag_used_mask
+    update_interval: 10s
+    lambda: |-
+      auto *s = EspNowSync::get();
+      if (!s) return std::string("n/a");
+      char buf[8];
+      sprintf(buf, "0x%04X", s->used_channel_mask());
+      return std::string(buf);
+
+  - platform: template
+    name: "Last Wake Src MAC"
+    update_interval: 10s
+    lambda: |-
+      auto *s = EspNowSync::get();
+      if (!s) return std::string("");
+      uint8_t m[6]; s->last_wake_src_mac(m);
+      char buf[24]; sprintf(buf, "%02X:%02X:%02X:%02X:%02X:%02X", m[0],m[1],m[2],m[3],m[4],m[5]);
+      return std::string(buf);
+
+  - platform: template
+    name: "Last RX Type"
+    id: diag_last_type
+    update_interval: 5s
+    lambda: |-
+      auto *s = EspNowSync::get();
+      if (!s) return std::string("n/a");
+      switch (s->last_rx_type()) {
+        case 0x02: return std::string("WAKE");
+        case 0x10: return std::string("LINK_PROBE");
+        case 0x11: return std::string("LINK_RESP");
+        case 0x12: return std::string("LINK_SET");
+        case 0x13: return std::string("LINK_ACK");
+        default:   return std::string("OTHER");
+      }
+
+  - platform: template
+    name: "Last RX MAC"
+    id: diag_last_mac
+    update_interval: 5s
+    lambda: |-
+      auto *s = EspNowSync::get();
+      if (!s) return std::string("n/a");
+      uint8_t m[6]; s->last_rx_mac(m);
+      char b[18];
+      sprintf(b, "%02X:%02X:%02X:%02X:%02X:%02X", m[0],m[1],m[2],m[3],m[4],m[5]);
+      return std::string(b);
+
+  - platform: template
+    name: "Queen MAC"
+    id: diag_queen_mac
+    update_interval: 10s
+    lambda: |-
+      auto *s = EspNowSync::get();
+      if (!s) return std::string("n/a");
+      char b[18];
+      uint8_t m[6]; s->queen_mac(m);
+      sprintf(b, "%02X:%02X:%02X:%02X:%02X:%02X", m[0],m[1],m[2],m[3],m[4],m[5]);
+      return std::string(b);
+
+  - platform: template
+    name: "Hive Status"
+    id: diag_hive_status
+    update_interval: 5s
+    lambda: |-
+      auto *s = EspNowSync::get();
+      if (!s) return std::string("n/a");
+      char buf[64]; char qbuf[18];
+      uint8_t qm[6]; s->queen_mac(qm);
+      sprintf(qbuf, "%02X:%02X:%02X:%02X:%02X:%02X", qm[0],qm[1],qm[2],qm[3],qm[4],qm[5]);
+      sprintf(buf, "Awake %us, Peers %d, Queen %s", s->hive_awake_ms_remaining()/1000, s->peer_count(), qbuf);
+      return std::string(buf);
+
+  - platform: template
+    name: "Peer Table"
+    id: diag_peer_table
+    update_interval: 10s
+    lambda: |-
+      auto *s = EspNowSync::get();
+      if (!s || s->get_peer_count() == 0) return std::string("None");
+      const auto* peers = s->get_peers();
+      char buf[512] = {0};
+      for(int i=0; i<s->get_peer_count(); i++) {
+        uint8_t m[6]; std::memcpy(m, peers[i].mac, 6);
+        char line[64];
+        sprintf(line, "Peer%d: MAC=%02X:%02X:%02X:%02X:%02X:%02X home=%u rssi=%d acked=%s\n", i, m[0],m[1],m[2],m[3],m[4],m[5], (unsigned)peers[i].home_ch, (int)peers[i].rssi, peers[i].acked ? "yes" : "no");
+        strncat(buf, line, sizeof(buf) - strlen(buf) - 1);
+      }
+      return std::string(buf);
+
+# Diagnostics binary sensors
+binary_sensor:
+  - platform: template
+    name: "Link Mode Active"
+    id: diag_link_active
+    lambda: |-
+      auto *s = EspNowSync::get();
+      return s && s->link_active();
+
+  - platform: template
+    name: "Hive Awake"
+    id: diag_hive_awake
+    lambda: |-
+      auto *s = EspNowSync::get();
+      return s && s->hive_awake_ms_remaining() > 0;
+
+  - platform: template
+    name: "Is Queen"
+    id: diag_is_queen
+    lambda: |-
+      auto *s = EspNowSync::get();
+      return s && s->is_queen();
+
+  - platform: template
+    name: "Time Synced"
+    id: diag_time_synced
+    lambda: |-
+      auto *s = EspNowSync::get();
+      return s && s->is_time_synced();
+
+  - platform: template
+    name: "RC Locked"
+    id: diag_rc_locked
+    lambda: |-
+      auto *s = EspNowSync::get();
+      return s && s->rc_locked();
+
+# Periodic ticks
+interval:
+  # Drive the header's loop() regularly
+  - interval: 100ms
+    then:
+      - lambda: |-
+          auto *s = EspNowSync::get();
+          if (s) s->loop();
+  # Refresh the two template binary_sensors
+  - interval: 1s
+    then:
+      - lambda: |-
+          auto *s = EspNowSync::get();
+          if (s) {
+            id(diag_link_active).publish_state(s->link_active());
+            id(diag_hive_awake).publish_state(s->hive_awake_ms_remaining() > 0);
+            id(diag_is_queen).publish_state(s->is_queen());
+            id(diag_time_synced).publish_state(s->is_time_synced());
+          }
+
+time:
+  - platform: sntp
+    id: my_time
+    timezone: UTC
+    servers:
+      - pool.ntp.org
+      - time.nist.gov
+      - time.google.com
