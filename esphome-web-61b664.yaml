@@ -1,7 +1,6 @@
 esphome:
   name: esphome-web-61b664
   friendly_name: Candle 3
-  build_path: /config/esphome/.out/esphome-web-61b664
   min_version: 2025.5.0
   name_add_mac_suffix: false
   includes:
