@@ -36,6 +36,8 @@ static volatile uint32_t *const ULP_CFG_BREATH_SMOOTH  = reinterpret_cast<volati
 static volatile uint32_t *const ULP_CFG_LVL_SMOOTH     = reinterpret_cast<volatile uint32_t *>(0x5000087c); // ulp_ulp_cfg_drift_div
 static volatile uint32_t *const ULP_CFG_TARGET_STRIDE  = reinterpret_cast<volatile uint32_t *>(0x50000878); // ulp_ulp_cfg_breath_smooth
 
+extern const uint8_t  lp_fpsm_c6_bin[];    // LP program bytes
+extern const unsigned lp_fpsm_c6_bin_len;  // length of array
 
 // Internal state
 static bool s_lp_loaded  = false;
@@ -363,6 +365,7 @@ void fpsm_apply_preset_nightlight_glow_v3() {
   fpsm_set_target_stride(5);  // modest responsiveness
 
 }
+
 
 
 
