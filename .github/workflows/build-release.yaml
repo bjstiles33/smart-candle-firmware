@@ -1,0 +1,87 @@
+# File: .github/workflows/build-release.yaml
+# WHAT THIS DOES (new file only):
+# - Compiles your ESPHome firmware for ESP32-C6 on each tagged release (or when you publish a Release)
+# - Produces:
+#     * out/firmware.ota.bin  (device-OTA format)
+#     * out/firmware.md5      (integrity check)
+#     * out/manifest.json     (for the Update entity)
+# - Uploads all three as GitHub Release assets
+
+name: build-esphome-c6-release
+
+on:
+  push:
+    tags:
+      - '20*.**.**'     # Tag like 2025.09.09 (YYYY.MM.DD)
+  release:
+    types: [published]  # Also run if you publish a Release from the UI
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # needed so the action can attach assets to the Release
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install ESPHome CLI
+        run: pip install esphome
+
+      # >>>>>>>>> EDIT THIS LINE IF YOUR YAML IS IN A DIFFERENT PATH <<<<<<<<<
+      # We are not modifying your YAML; we just tell ESPHome which file to compile.
+      - name: Compile OTA firmware
+        run: |
+          esphome compile devices/candle.yaml
+          BIN="$(ls .esphome/build/*/.pioenvs/*/firmware.ota.bin | head -n1)"
+          if [ -z "$BIN" ]; then
+            echo "ERROR: firmware.ota.bin not found (check YAML path and build logs)"
+            exit 1
+          fi
+          mkdir -p out
+          cp "$BIN" out/firmware.ota.bin
+          md5sum out/firmware.ota.bin | awk '{print $1}' > out/firmware.md5
+
+      - name: Create manifest.json
+        run: |
+          VERSION="${{ github.event.release.tag_name || github.ref_name }}"
+          MD5="$(cat out/firmware.md5)"
+          REPO="${{ github.repository }}"
+          mkdir -p out
+          cat > out/manifest.json <<EOF
+          {
+            "name": "Smart Candle",
+            "version": "${VERSION}",
+            "builds": [
+              {
+                "chipFamily": "ESP32-C6",
+                "ota": {
+                  "md5": "${MD5}",
+                  "path": "https://github.com/${REPO}/releases/download/${VERSION}/firmware.ota.bin",
+                  "release_url": "https://github.com/${REPO}/releases/tag/${VERSION}",
+                  "summary": "Automated build ${VERSION}"
+                }
+              }
+            ]
+          }
+          EOF
+          echo "Generated manifest.json:"
+          cat out/manifest.json
+
+      - name: Upload assets to Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.release.tag_name || github.ref_name }}
+          files: |
+            out/firmware.ota.bin
+            out/firmware.md5
+            out/manifest.json
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          draft: false
+          prerelease: false
