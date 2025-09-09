@@ -7,6 +7,7 @@ esphome:
     - components/sync/espnow_sync.h
     - components/fpsm/fpsm_flicker.h
     - components/fpsm/fpsm_component.h
+    - components/fpsm/ulp/lp_core_bin.h
   platformio_options:
     build_flags:
       - -I"/components/fpsm"
