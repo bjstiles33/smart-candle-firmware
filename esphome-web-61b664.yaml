@@ -9,8 +9,8 @@ esphome:
     - components/fpsm/fpsm_component.h
   platformio_options:
     build_flags:
-      - -I"/config/esphome/components/fpsm"
-      - -I"/config/esphome/components/fpsm/ulp"
+      - -I"/components/fpsm"
+      - -I"/components/fpsm/ulp"
   on_boot:
     - priority: 900.0
       then:
