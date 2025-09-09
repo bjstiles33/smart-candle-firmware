@@ -90,7 +90,7 @@ esp32:
 external_components:
   - source:
       type: local
-      path: /config/esphome/components      # parent that contains ./components/fpsm/
+      path: components      # parent that contains ./components/fpsm/
     components: [ fpsm ]
   - source: github://rednblkx/HAP-ESPHome@b8494709780c5ca0e83cbcc3fb865dc800d03c73     # pinned HomeKit
   - source: github://PhracturedBlue/c6_adc@665cc257fd0607c270da762a80e3baa6a788926b     # pinned ADC
