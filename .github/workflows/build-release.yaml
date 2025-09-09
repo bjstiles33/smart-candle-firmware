@@ -37,7 +37,7 @@ jobs:
       # We are not modifying your YAML; we just tell ESPHome which file to compile.
       - name: Compile OTA firmware
         run: |
-          esphome compile devices/candle.yaml
+          esphome compile esphome-web-61b664.yaml
           BIN="$(ls .esphome/build/*/.pioenvs/*/firmware.ota.bin | head -n1)"
           if [ -z "$BIN" ]; then
             echo "ERROR: firmware.ota.bin not found (check YAML path and build logs)"
